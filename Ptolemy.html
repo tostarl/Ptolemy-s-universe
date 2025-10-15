@@ -1,0 +1,239 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>托勒密地心说：本轮（Epicycle）与均轮（Deferent） 动画</title>
+  <style>
+    :root{--bg:#0f1724;--panel:#0b1220;--accent:#7dd3fc;--muted:#94a3b8}
+    html,body{height:100%;margin:0;font-family:Inter,ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,'Helvetica Neue',Arial}
+    body{display:flex;gap:12px;align-items:flex-start;justify-content:center;padding:18px;background:linear-gradient(180deg,#071029 0%, #071827 100%);color:#e6eef8}
+    .app{display:flex;gap:12px;width:1200px}
+    .canvas-wrap{background:linear-gradient(180deg,#071229,#07172b);padding:12px;border-radius:12px;box-shadow:0 10px 30px rgba(2,6,23,0.7)}
+    canvas{background:transparent;border-radius:8px;display:block}
+    .panel{width:360px;background:linear-gradient(180deg,var(--panel),#071421);padding:14px;border-radius:12px;box-shadow:inset 0 1px 0 rgba(255,255,255,0.02)}
+    h1{font-size:16px;margin:0 0 8px}
+    label{display:block;font-size:13px;color:var(--muted);margin-top:10px}
+    .row{display:flex;gap:8px;align-items:center}
+    input[type=range]{width:100%}
+    .small{font-size:12px;color:var(--muted)}
+    .controls{display:flex;gap:8px;margin-top:10px}
+    button{background:var(--accent);border:none;padding:8px 10px;border-radius:8px;color:#012;cursor:pointer;font-weight:600}
+    button.ghost{background:transparent;border:1px solid rgba(125,211,252,0.15);color:var(--accent)}
+    .footer{margin-top:12px;font-size:12px;color:var(--muted)}
+    .stat{font-size:13px;color:#dff6ff;margin-top:8px}
+    .list{display:flex;flex-direction:column;gap:6px}
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="canvas-wrap">
+      <canvas id="stage" width="760" height="560"></canvas>
+      <div style="display:flex;gap:8px;margin-top:8px;justify-content:center">
+        <button id="play">播放</button>
+        <button id="pause" class="ghost">暂停</button>
+        <button id="reset" class="ghost">重置</button>
+        <button id="toggle-trail" class="ghost">切换轨迹</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h1>托勒密本轮（Epicycle）与均轮（Deferent）示意</h1>
+      <div class="small">用滑块调整参数，观察不同角速度/半径如何产生复杂的行星运动。</div>
+
+      <label>本轮半径 (R_epicycle) <span id="r0val">150</span></label>
+      <input id="r0" type="range" min="20" max="300" step="1" value="150">
+
+      <label>本轮角速度 ω<sub>0</sub> (deg/s) <span id="w0val">10</span></label>
+      <input id="w0" type="range" min="-60" max="60" step="0.5" value="10">
+
+      <label>均轮个数 (N_deferent) <span id="Nval">2</span></label>
+      <input id="N" type="range" min="0" max="6" step="1" value="2">
+
+      <div id="epicycles-controls" class="list"></div>
+
+      <div class="controls">
+        <button id="add-epi">新增均轮</button>
+        <button id="remove-epi" class="ghost">移除均轮</button>
+      </div>
+
+      <div class="stat">说明：地心位于画布中心；均轮（Deferent）为较大圆，本轮（Epicycle）为附着在均轮上的小圆。最终“行星”位于最内层均轮的边缘并留下轨迹。</div>
+      <div class="footer">提示：你可以拖动滑块、改角速度为负号以反向转动，或将均轮数调高观察回归轨道与复杂循环。</div>
+    </div>
+  </div>
+
+  <script>
+    // ======= 基本设置 =======
+    const canvas = document.getElementById('stage');
+    const ctx = canvas.getContext('2d');
+    const W = canvas.width, H = canvas.height;
+    const cx = W/2, cy = H/2;
+
+    // 状态
+    let running = true;
+    let t = 0; // 时间 (秒)
+    let dt = 0.016; // ~60fps
+    let trailOn = true;
+    let trail = [];
+    const maxTrail = 2000;
+
+    // DOM controls
+    const r0Slider = document.getElementById('r0');
+    const w0Slider = document.getElementById('w0');
+    const Nslider = document.getElementById('N');
+    const r0val = document.getElementById('r0val');
+    const w0val = document.getElementById('w0val');
+    const Nval = document.getElementById('Nval');
+    const epiControls = document.getElementById('epicycles-controls');
+
+    document.getElementById('play').onclick = ()=> running = true;
+    document.getElementById('pause').onclick = ()=> running = false;
+    document.getElementById('reset').onclick = ()=>{ t=0; trail = []; }
+    document.getElementById('toggle-trail').onclick = ()=>{ trailOn = !trailOn; if(!trailOn) trail=[] };
+    document.getElementById('add-epi').onclick = ()=>{ addEpicycle(); renderEpiControls(); }
+    document.getElementById('remove-epi').onclick = ()=>{ removeEpicycle(); renderEpiControls(); }
+
+    r0Slider.oninput = ()=> { r0val.textContent = r0Slider.value; }
+    w0Slider.oninput = ()=> { w0val.textContent = w0Slider.value; }
+    Nslider.oninput = ()=>{ const n = parseInt(Nslider.value); Nval.textContent = n; setEpicyclesCount(n); renderEpiControls(); }
+
+    // ======= 模型参数 =======
+    let R_deferent = Number(r0Slider.value);
+    let omega0 = Number(w0Slider.value) * Math.PI/180; // 转换成弧度/秒
+
+    // 均轮数组：每个均轮是{r, omega, phase}
+    let epicycles = [
+      {r:50, omega: -30 * Math.PI/180, phase: 0},
+      {r:22, omega: 70 * Math.PI/180, phase: 0}
+    ];
+
+    function setEpicyclesCount(n){
+      while(epicycles.length < n) addEpicycle();
+      while(epicycles.length > n) removeEpicycle();
+    }
+    function addEpicycle(){ epicycles.push({r: Math.max(6, 50*(0.6**epicycles.length)), omega: (epicycles.length%2?40:-30)*Math.PI/180, phase:0}); Nslider.value = epicycles.length; Nval.textContent = epicycles.length; }
+    function removeEpicycle(){ if(epicycles.length>0) epicycles.pop(); Nslider.value = epicycles.length; Nval.textContent = epicycles.length; }
+
+    function renderEpiControls(){
+      epiControls.innerHTML = '';
+      epicycles.forEach((e,i)=>{
+        const div = document.createElement('div');
+        div.style.padding = '6px 8px';
+        div.style.background = 'rgba(255,255,255,0.02)';
+        div.style.borderRadius = '8px';
+        div.innerHTML = `
+          <div style="display:flex;justify-content:space-between;align-items:center">
+            <strong>均轮 ${i+1}</strong>
+            <div class="small">r=${Math.round(e.r)} &nbsp; ω=${(e.omega*180/Math.PI).toFixed(1)}°/s</div>
+          </div>
+          <label class="small">半径 r<input type="range" min="2" max="200" step="1" data-i="${i}" class="epi-r" value="${e.r}"/></label>
+          <label class="small">角速度 ω (deg/s)<input type="range" min="-180" max="180" step="0.5" data-i="${i}" class="epi-w" value="${(e.omega*180/Math.PI).toFixed(2)}"/></label>
+          <label class="small">初相位 φ (deg)<input type="range" min="0" max="360" step="1" data-i="${i}" class="epi-ph" value="${Math.round(e.phase*180/Math.PI)}"/></label>
+        `;
+        epiControls.appendChild(div);
+      });
+
+      // attach events
+      document.querySelectorAll('.epi-r').forEach(inp=>{ inp.oninput = (ev)=>{ const idx=ev.target.dataset.i; epicycles[idx].r = Number(ev.target.value); }; });
+      document.querySelectorAll('.epi-w').forEach(inp=>{ inp.oninput = (ev)=>{ const idx=ev.target.dataset.i; epicycles[idx].omega = Number(ev.target.value) * Math.PI/180; }; });
+      document.querySelectorAll('.epi-ph').forEach(inp=>{ inp.oninput = (ev)=>{ const idx=ev.target.dataset.i; epicycles[idx].phase = Number(ev.target.value) * Math.PI/180; }; });
+    }
+
+    renderEpiControls();
+
+    // ======= 绘图与运动学 =======
+    function clear(){ ctx.clearRect(0,0,W,H); }
+
+    function drawCircle(x,y,r,opts={stroke:true,fill:false,lineWidth:1,strokeStyle:'rgba(125,211,252,0.12)'}){
+      ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); if(opts.stroke){ ctx.lineWidth = opts.lineWidth; ctx.strokeStyle = opts.strokeStyle; ctx.stroke(); } if(opts.fill){ ctx.fillStyle = opts.fillStyle||'rgba(255,255,255,0.02)'; ctx.fill(); } }
+
+    function drawDot(x,y,size=4,txt){ ctx.beginPath(); ctx.arc(x,y,size,0,Math.PI*2); ctx.fillStyle='rgba(255,255,255,0.95)'; ctx.fill(); if(txt){ ctx.font='12px sans-serif'; ctx.fillStyle='#cbe7f8'; ctx.fillText(txt,x+8,y-8);} }
+
+    function computePosition(time){
+      // 本轮中心在画布中心 (地心)
+      const R = Number(r0Slider.value);
+      const w0 = Number(w0Slider.value) * Math.PI/180;
+      let x = cx + R * Math.cos(w0 * time);
+      let y = cy + R * Math.sin(w0 * time);
+      let pos = {x,y};
+      // 对每一个均轮，在前一个圆周的边缘再做旋转
+      let history = [{x:cx,y:cy,r:R,omega:w0,angle:w0*time}];
+      let currX = cx + R * Math.cos(w0 * time);
+      let currY = cy + R * Math.sin(w0 * time);
+      let angleAccum = 0;
+      for(let i=0;i<epicycles.length;i++){
+        const e = epicycles[i];
+        const ang = e.phase + e.omega * time; // 相对角度
+        const rx = e.r * Math.cos(ang);
+        const ry = e.r * Math.sin(ang);
+        currX = currX + rx;
+        currY = currY + ry;
+        history.push({x: currX, y: currY, r: e.r, omega: e.omega, angle: ang});
+      }
+      return {pos:{x:currX,y:currY}, history};
+    }
+
+    function render(time){
+      clear();
+      // 背景格网 (轻微)
+      ctx.save(); ctx.globalAlpha=0.06; for(let gx=0;gx<W;gx+=40){ ctx.beginPath(); ctx.moveTo(gx,0); ctx.lineTo(gx,H); ctx.strokeStyle='#bcd'; ctx.lineWidth=1; ctx.stroke(); } for(let gy=0;gy<H;gy+=40){ ctx.beginPath(); ctx.moveTo(0,gy); ctx.lineTo(W,gy); ctx.stroke(); } ctx.restore();
+
+      const state = computePosition(time);
+      // 画本轮
+      const base = state.history[0];
+      drawCircle(cx,cy, base.r, {stroke:true, lineWidth:1.5, strokeStyle:'rgba(125,211,252,0.18)'});
+      // 画每个均轮和连接线
+      ctx.lineWidth=1.2;
+      for(let i=1;i<state.history.length;i++){
+        const prev = (i===1) ? {x:cx,y:cy} : state.history[i-1];
+        const h = state.history[i];
+        // 小圆
+        drawCircle(prev.x, prev.y, h.r, {stroke:true, lineWidth:1, strokeStyle:'rgba(255,255,255,0.06)'});
+        // 连接线到小圆上的点
+        ctx.beginPath(); ctx.moveTo(prev.x, prev.y); ctx.lineTo(h.x, h.y); ctx.strokeStyle='rgba(173,216,230,0.22)'; ctx.stroke();
+        // 在小圆边缘画运动点
+        drawDot(h.x, h.y, 4);
+      }
+
+      // 画行星位置并轨迹
+      const planet = state.pos;
+      if(trailOn){ trail.push({x:planet.x,y:planet.y}); if(trail.length>maxTrail) trail.shift(); }
+      // 轨迹
+      if(trail.length>1){ ctx.beginPath(); for(let i=0;i<trail.length;i++){ const p=trail[i]; if(i===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y); } ctx.strokeStyle='rgba(255,200,120,0.9)'; ctx.lineWidth=1.6; ctx.stroke(); }
+
+      // 最终行星
+      drawDot(planet.x, planet.y, 5, '行星');
+
+      // 注释：地心
+      ctx.font='13px sans-serif'; ctx.fillStyle='#9fcfff'; ctx.fillText('地心', cx-28, cy-8);
+
+      // 小字显示当前时间和参数
+      ctx.font='12px monospace'; ctx.fillStyle='#9fd'; ctx.fillText(`t=${time.toFixed(2)}s  本轮R=${r0Slider.value}  ω0=${w0Slider.value}°/s  均轮数=${epicycles.length}`, 12, H-12);
+    }
+
+    // ======= 动画循环 =======
+    let last = performance.now();
+    function loop(now){
+      const elapsed = (now-last)/1000; last = now;
+      if(running) t += elapsed;
+      render(t);
+      requestAnimationFrame(loop);
+    }
+
+    requestAnimationFrame(loop);
+
+    // ======= 当控件改变时更新参数和重画 =======
+    r0Slider.addEventListener('input', ()=>{ render(t); });
+    w0Slider.addEventListener('input', ()=>{ render(t); });
+
+    // 防止失焦时动画卡住，允许画布拖动参数
+    canvas.addEventListener('dblclick', ()=>{ running = !running; });
+
+    // 初始化显示值
+    r0val.textContent = r0Slider.value;
+    w0val.textContent = w0Slider.value;
+    Nval.textContent = epicycles.length;
+
+  </script>
+</body>
+</html>
